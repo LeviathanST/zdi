@@ -1,0 +1,18 @@
+on: 
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    strategy:
+      runs_on: ubuntu-latest
+      steps:
+        - name: checkout
+          uses: actions/checkout@v4
+
+        - name: setup zig
+          uses: mlugg/setup-zig@v2.0.5
+          with: 
+            version: 0.15.1
+          run: zig build test --summary all
