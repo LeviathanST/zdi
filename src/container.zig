@@ -14,6 +14,9 @@ pub const Container = struct {
         aa.* = std.heap.ArenaAllocator.init(alloc);
 
         const allocator = aa.allocator();
+        // NOTE: If not allocated as static memory (heap), when the container
+        //       is transferred as an argument, it will be copied to new memory
+        //       region and make all memory dependencies invalid.
         const self = try allocator.create(Container);
         errdefer allocator.destroy(self);
 
