@@ -16,6 +16,11 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
     const run_exe_step = b.step("run", "Run the application");
     const run_exe = b.addRunArtifact(exe);
+
+    if (b.args) |args| {
+        run_exe.addArgs(args);
+    }
+
     exe.root_module.addImport("zdi", b.dependency("zdi", .{}).module("zdi"));
     run_exe_step.dependOn(&run_exe.step);
 }
