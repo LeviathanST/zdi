@@ -1,29 +1,49 @@
+// TODO: describe about CI concepts
 const std = @import("std");
 const testing = std.testing;
 
 /// A container contains all dependencies
 pub const Container = struct {
-    refs: []Ref = &.{},
+    refs: std.ArrayList(Ref),
     alloc: std.mem.Allocator,
     _arena: *std.heap.ArenaAllocator,
 
-    pub fn init(alloc: std.mem.Allocator) !Container {
+    pub fn init(alloc: std.mem.Allocator) !*Container {
         var aa = try alloc.create(std.heap.ArenaAllocator);
+        errdefer alloc.destroy(aa);
         aa.* = std.heap.ArenaAllocator.init(alloc);
 
-        return .{
-            .alloc = aa.allocator(),
+        const allocator = aa.allocator();
+        // NOTE: If not allocated as static memory (heap), when the container
+        //       is transferred as an argument, it will be copied to new memory
+        //       region and make all memory dependencies invalid.
+        const self = try allocator.create(Container);
+        errdefer allocator.destroy(self);
+
+        self.* = .{
+            .refs = try .initCapacity(alloc, 64),
+            .alloc = allocator,
             ._arena = aa,
         };
+
+        return self;
     }
 
+    /// Automatically call `deinit()` from dependencies
+    /// if its exsists.
     pub fn deinit(self: *Container) void {
-        // TODO: call dependencies's `deinit()` if needed
+        for (self.refs.items) |*ref| {
+            if (ref.deinit_fn) |deinit_fn| deinit_fn(ref);
+        }
 
         const alloc = self._arena.child_allocator;
-        self.alloc.free(self.refs);
-        self._arena.deinit();
-        alloc.destroy(self._arena);
+        self.refs.deinit(alloc);
+        // NOTE: When the arena is deinit, the container is also deinit too Then,
+        //       we cant free arena via `alloc.destroy(self._arena)` so
+        //       need to store the arena ptr and deinit later.
+        const arena_ptr = self._arena;
+        arena_ptr.deinit();
+        alloc.destroy(arena_ptr);
     }
 
     /// Find a value of `T` type in the container
@@ -31,7 +51,7 @@ pub const Container = struct {
         const typeInfo = @typeInfo(T);
         const Type = if (typeInfo == .pointer) std.meta.Child(T) else T;
 
-        for (self.refs) |ref|
+        for (self.refs.items) |ref| {
             // check the appropriate type
             if (ref.match(Type)) {
                 // if `T` is a pointer, check if it can
@@ -44,28 +64,21 @@ pub const Container = struct {
                 }
 
                 return @as(*Type, @ptrCast(@alignCast(@constCast(ref.ptr)))).*;
-            };
+            }
+        }
 
         return null;
     }
 
     /// Append a ref into the container
     /// Currently, this function only run on runtime.
-    /// TODO: make it comptime
     pub fn pushRef(self: *Container, value: anytype) !void {
-        std.log.debug("[ ] {s}\r\n", .{@typeName(@TypeOf(value))});
+        std.log.debug("\x1b[1;32mAppend:\x1b[0m {s}\r\n", .{@typeName(@TypeOf(value))});
+        errdefer std.log.debug("\x1b[2K\x1b[1A- Error occured\r\n", .{});
         std.debug.assert(@typeInfo(@TypeOf(value)) == .pointer); // `value` must be a pointer
 
-        var new_refs = try self.alloc.alloc(Ref, self.refs.len + 1);
-        for (self.refs, 0..) |ref, i|
-            new_refs[i] = ref;
-
-        // append the new value
-        new_refs[self.refs.len] = .from(value);
-
-        self.alloc.free(self.refs);
-        self.refs = new_refs;
-        std.log.debug("\x1b[2K\x1b[1A\x1b[2K- Done\r\n", .{});
+        try self.refs.append(self.alloc, .from(value));
+        std.log.debug("\x1b[2K\x1b[1A- Done\r\n", .{});
     }
 
     test "find & pushRef" {
@@ -90,6 +103,7 @@ pub const Ref = struct {
     tid: TypeId,
     ptr: *const anyopaque,
     is_const: bool,
+    deinit_fn: ?*const fn (*Ref) void,
 
     const TypeId = struct {
         name: []const u8,
@@ -105,11 +119,25 @@ pub const Ref = struct {
 
     pub fn from(value: anytype) Ref {
         const ptr_info = @typeInfo(@TypeOf(value)).pointer;
-        return .{
-            .tid = .from(ptr_info.child),
+        const OriginType = ptr_info.child;
+
+        var self: Ref = .{
+            .tid = .from(OriginType),
             .ptr = value,
             .is_const = ptr_info.is_const,
+            .deinit_fn = null,
         };
+
+        if (std.meta.hasMethod(OriginType, "deinit")) {
+            const H = struct {
+                pub fn deinit(ref: *Ref) void {
+                    OriginType.deinit(@ptrCast(@alignCast(@constCast(ref.ptr))));
+                }
+            };
+            self.deinit_fn = H.deinit;
+        }
+
+        return self;
     }
 
     test "match" {
